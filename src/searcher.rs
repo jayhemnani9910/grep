@@ -189,9 +189,7 @@ impl<'a> Searcher<'a> {
 
             // Handle include/exclude globs.
             let name = entry.file_name();
-            if (!self.config.include_globs.is_empty() && !self.config.include_globs.matches(name))
-                || self.config.exclude_globs.matches(name)
-            {
+            if self.config.file_globs.skips(name) {
                 continue;
             }
 

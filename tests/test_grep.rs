@@ -1607,6 +1607,39 @@ fn recursive_with_include_exclude() {
 }
 
 #[test]
+fn recursive_include_exclude_last_match_wins() {
+    let (scene, _) = ucmd();
+    build_tree(&scene);
+    scene.fixtures.write("excludes", "*.log\n");
+
+    // a.txt matches both, and the later --include wins. b.log matches
+    // neither and is kept, since the first pattern is an --exclude.
+    for first in ["--exclude=a*", "--exclude=zz"] {
+        let mut c = scene.cmd(env!("CARGO_BIN_EXE_grep"));
+        c.args(&["-r", "-l", first, "--include=*.txt", "grep", "tree"])
+            .succeeds()
+            .stdout_contains("a.txt")
+            .stdout_contains("b.log")
+            .stdout_contains("c.txt");
+    }
+
+    // --exclude-from counts at its own position: it comes last here, so
+    // b.log is excluded, and the .txt files match nothing after a first
+    // --include.
+    let mut c = scene.cmd(env!("CARGO_BIN_EXE_grep"));
+    c.args(&[
+        "-r",
+        "-l",
+        "--include=*.log",
+        "--exclude-from=excludes",
+        "grep",
+        "tree",
+    ])
+    .fails_with_code(1)
+    .no_stdout();
+}
+
+#[test]
 fn recursive_exclude_from_file() {
     let (scene, mut c) = ucmd();
     build_tree(&scene);
