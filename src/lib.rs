@@ -89,8 +89,7 @@ pub struct Config<'a> {
     pub directory_mode: DirectoryMode,
     pub device_mode: DeviceMode,
     pub follow_symlinks: bool,
-    pub include_globs: GlobSet,
-    pub exclude_globs: GlobSet,
+    pub file_globs: FileGlobs,
     pub exclude_dir_globs: GlobSet,
     pub label: &'a str,
     #[cfg(windows)]
@@ -184,11 +183,6 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     let devices = matches.get_one::<String>("devices").map(String::as_str);
     let recursive = matches.get_flag("recursive");
     let dereference_recursive = matches.get_flag("dereference_recursive");
-    let include = matches.get_many::<String>("include").unwrap_or_default();
-    let exclude = matches.get_many::<String>("exclude").unwrap_or_default();
-    let exclude_from = matches
-        .get_many::<String>("exclude_from")
-        .unwrap_or_default();
     let exclude_dir = matches
         .get_many::<String>("exclude_dir")
         .unwrap_or_default();
@@ -341,29 +335,34 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
             (before, after, has)
         }
     };
-    let include_globs = {
-        let mut patterns = GlobSet::with_capacity(include.len());
-        for pattern in include {
-            patterns.add(pattern)?;
+    // --include, --exclude and --exclude-from in command-line order.
+    let mut globs: Vec<(usize, bool, String)> = Vec::new();
+    for (include, id) in [(true, "include"), (false, "exclude")] {
+        if let (Some(values), Some(indices)) =
+            (matches.get_many::<String>(id), matches.indices_of(id))
+        {
+            globs.extend(indices.zip(values).map(|(i, v)| (i, include, v.clone())));
         }
-        patterns
-    };
-    let exclude_globs = {
-        let mut patterns = GlobSet::with_capacity(exclude.len());
-        for pattern in exclude {
-            patterns.add(pattern)?;
-        }
-        for path in exclude_from {
+    }
+    if let (Some(paths), Some(indices)) = (
+        matches.get_many::<String>("exclude_from"),
+        matches.indices_of("exclude_from"),
+    ) {
+        for (i, path) in indices.zip(paths) {
             let contents = std::fs::read_to_string(path).map_err(|err| read_error(path, &err))?;
             for line in contents.lines() {
                 let trimmed = line.trim();
                 if !trimmed.is_empty() {
-                    patterns.add(trimmed)?;
+                    globs.push((i, false, trimmed.to_string()));
                 }
             }
         }
-        patterns
-    };
+    }
+    globs.sort_by_key(|(i, _, _)| *i);
+    let mut file_globs = FileGlobs::default();
+    for (_, include, pattern) in &globs {
+        file_globs.add(*include, pattern)?;
+    }
     let exclude_dir_globs = {
         let mut patterns = GlobSet::with_capacity(exclude_dir.len());
         for pattern in exclude_dir {
@@ -410,8 +409,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         directory_mode,
         device_mode,
         follow_symlinks: dereference_recursive,
-        include_globs,
-        exclude_globs,
+        file_globs,
         exclude_dir_globs,
         label,
         #[cfg(windows)]
@@ -988,15 +986,41 @@ impl GlobSet {
         Ok(())
     }
 
-    fn is_empty(&self) -> bool {
-        self.patterns.is_empty()
-    }
-
     fn matches(&self, name: &OsStr) -> bool {
         let Some(name) = name.to_str() else {
             return false;
         };
         self.patterns.iter().any(|pattern| pattern.matches(name))
+    }
+}
+
+/// The --include and --exclude patterns, in command-line order. As in GNU
+/// grep, the last pattern that matches a name decides. If none matches, the
+/// name is skipped only when the first pattern is an --include.
+#[derive(Default)]
+pub struct FileGlobs {
+    patterns: Vec<(bool, glob::Pattern)>,
+}
+
+impl FileGlobs {
+    fn add(&mut self, include: bool, pattern: &str) -> UResult<()> {
+        let compiled_pattern = glob::Pattern::new(pattern)
+            .map_err(|e| USimpleError::new(2, format!("invalid glob '{pattern}': {e}")))?;
+        self.patterns.push((include, compiled_pattern));
+        Ok(())
+    }
+
+    pub fn skips(&self, name: &OsStr) -> bool {
+        let last_match = name.to_str().and_then(|name| {
+            self.patterns
+                .iter()
+                .rev()
+                .find(|(_, pattern)| pattern.matches(name))
+        });
+        match last_match {
+            Some((include, _)) => !include,
+            None => self.patterns.first().is_some_and(|(include, _)| *include),
+        }
     }
 }
 
