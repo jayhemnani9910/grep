@@ -78,9 +78,12 @@ pub struct ColorConfig<'a> {
     pub no_erase: bool,
 }
 
+/// Include and exclude patterns, in command-line order. As in GNU grep, the
+/// last pattern that matches a name decides. If none matches, the name is
+/// skipped only when the first pattern is an include.
 #[doc(hidden)]
 pub struct GlobSet {
-    patterns: Vec<glob::Pattern>,
+    patterns: Vec<(bool, glob::Pattern)>,
 }
 
 #[doc(hidden)]
@@ -89,7 +92,7 @@ pub struct Config<'a> {
     pub directory_mode: DirectoryMode,
     pub device_mode: DeviceMode,
     pub follow_symlinks: bool,
-    pub file_globs: FileGlobs,
+    pub file_globs: GlobSet,
     pub exclude_dir_globs: GlobSet,
     pub label: &'a str,
     #[cfg(windows)]
@@ -359,14 +362,14 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         }
     }
     globs.sort_by_key(|(i, _, _)| *i);
-    let mut file_globs = FileGlobs::default();
+    let mut file_globs = GlobSet::with_capacity(globs.len());
     for (_, include, pattern) in &globs {
         file_globs.add(*include, pattern)?;
     }
     let exclude_dir_globs = {
         let mut patterns = GlobSet::with_capacity(exclude_dir.len());
         for pattern in exclude_dir {
-            patterns.add(pattern)?;
+            patterns.add(false, pattern)?;
         }
         patterns
     };
@@ -979,30 +982,6 @@ impl GlobSet {
         }
     }
 
-    fn add(&mut self, pattern: &str) -> UResult<()> {
-        let compiled_pattern = glob::Pattern::new(pattern)
-            .map_err(|e| USimpleError::new(2, format!("invalid glob '{pattern}': {e}")))?;
-        self.patterns.push(compiled_pattern);
-        Ok(())
-    }
-
-    fn matches(&self, name: &OsStr) -> bool {
-        let Some(name) = name.to_str() else {
-            return false;
-        };
-        self.patterns.iter().any(|pattern| pattern.matches(name))
-    }
-}
-
-/// The --include and --exclude patterns, in command-line order. As in GNU
-/// grep, the last pattern that matches a name decides. If none matches, the
-/// name is skipped only when the first pattern is an --include.
-#[derive(Default)]
-pub struct FileGlobs {
-    patterns: Vec<(bool, glob::Pattern)>,
-}
-
-impl FileGlobs {
     fn add(&mut self, include: bool, pattern: &str) -> UResult<()> {
         let compiled_pattern = glob::Pattern::new(pattern)
             .map_err(|e| USimpleError::new(2, format!("invalid glob '{pattern}': {e}")))?;

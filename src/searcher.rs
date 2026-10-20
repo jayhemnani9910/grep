@@ -170,7 +170,7 @@ impl<'a> Searcher<'a> {
             // We're only interested in files, so skip dirs.
             // If we have a --exclude-dir pattern, skip matching directories entirely.
             if file_type.is_dir() {
-                if self.config.exclude_dir_globs.matches(entry.file_name()) {
+                if self.config.exclude_dir_globs.skips(entry.file_name()) {
                     walker.skip_current_dir();
                 }
                 continue;
