@@ -287,6 +287,15 @@ impl CompiledPattern {
             ));
         }
 
+        if matches!(config.regex_mode, RegexMode::Basic | RegexMode::Extended)
+            && has_reversed_interval(pattern.as_bytes(), config.regex_mode == RegexMode::Extended)
+        {
+            return Err(USimpleError::new(
+                2,
+                "Invalid content of \\{\\}".to_string(),
+            ));
+        }
+
         let mut normalized_pattern = None;
         let pattern = if config.regex_mode == RegexMode::Extended {
             if let Some((op, rest)) = strip_leading_repeat_operator(pattern) {
@@ -557,6 +566,49 @@ fn has_confusing_bracket(pattern: &[u8]) -> bool {
     false
 }
 
+/// True when `pattern` holds an interval whose lower bound is above its upper
+/// bound, like `a{2,1}` (`a\\{2,1\\}` in a basic regexp). GNU grep rejects it;
+/// Oniguruma would read it as a possessive `{1,2}`.
+fn has_reversed_interval(pattern: &[u8], extended: bool) -> bool {
+    let mut i = 0;
+    while i < pattern.len() {
+        let open = match pattern[i] {
+            b'[' => {
+                i = scan_bracket(pattern, i + 1).1;
+                continue;
+            }
+            b'\\' if !extended && pattern.get(i + 1) == Some(&b'{') => i + 2,
+            b'\\' => {
+                i += 2;
+                continue;
+            }
+            b'{' if extended => i + 1,
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+        let body_end = (open..pattern.len())
+            .find(|&j| !pattern[j].is_ascii_digit() && pattern[j] != b',')
+            .unwrap_or(pattern.len());
+        let closes = if extended {
+            pattern.get(body_end) == Some(&b'}')
+        } else {
+            pattern[body_end..].starts_with(b"\\}")
+        };
+        let body = std::str::from_utf8(&pattern[open..body_end]).unwrap_or_default();
+        if closes
+            && let Some((low, high)) = body.split_once(',')
+            && let (Ok(low), Ok(high)) = (low.parse::<u64>(), high.parse::<u64>())
+            && low > high
+        {
+            return true;
+        }
+        i = body_end;
+    }
+    false
+}
+
 /// Scan the body of a bracket expression starting at `start` (just past the
 /// `[`). Returns whether it is a misspelled character class and the index just
 /// past its closing `]`.
@@ -618,7 +670,7 @@ fn find_bracket_subexpr_end(pattern: &[u8], start: usize, delimiter: u8) -> Opti
 
 #[cfg(test)]
 mod tests {
-    use super::{has_confusing_bracket, plain_literal};
+    use super::{has_confusing_bracket, has_reversed_interval, plain_literal};
     use crate::RegexMode;
 
     fn lit(p: &str, ic: bool, mode: RegexMode) -> Option<Vec<u8>> {
@@ -659,6 +711,37 @@ mod tests {
         assert_eq!(lit("abc", true, RegexMode::Basic), None);
         assert_eq!(lit("café", false, RegexMode::Fixed), None); // non-ASCII
         assert_eq!(lit("naïve", false, RegexMode::Basic), None);
+    }
+
+    #[test]
+    fn detects_reversed_intervals() {
+        for (p, extended) in [
+            ("a{2,1}", true),
+            ("x{5,0}", true),
+            ("(ab){3,2}c", true),
+            ("a\\{2,1\\}", false),
+        ] {
+            assert!(
+                has_reversed_interval(p.as_bytes(), extended),
+                "pattern {p:?}"
+            );
+        }
+        for (p, extended) in [
+            ("a{1,2}", true),
+            ("a{2,2}", true),
+            ("a{,1}", true),
+            ("a{2,}", true),
+            ("[{2,1}]", true),
+            ("a\\{2,1}", true),
+            ("a{2,1}", false),
+            ("a\\{1,2\\}", false),
+            ("[\\{2,1\\}]", false),
+        ] {
+            assert!(
+                !has_reversed_interval(p.as_bytes(), extended),
+                "pattern {p:?}"
+            );
+        }
     }
 
     #[test]
