@@ -241,6 +241,24 @@ fn reversed_interval_is_error() {
 }
 
 #[test]
+fn empty_interval_repeats_from_zero() {
+    // GNU reads `{,}` as `{0,}`, in extended and basic syntax.
+    for args in [&["-E", "fo{,}"][..], &["fo\\{,\\}"][..]] {
+        let (_s, mut c) = ucmd();
+        c.args(args)
+            .pipe_in("f\nfoo\nx\n")
+            .succeeds()
+            .stdout_is("f\nfoo\n");
+    }
+
+    let (_s, mut c) = ucmd();
+    c.args(&["-xE", "(ab){,}x"])
+        .pipe_in("x\nababx\nax\n")
+        .succeeds()
+        .stdout_is("x\nababx\n");
+}
+
+#[test]
 fn max_count_rewinds_seekable_stdin() {
     // -m stops mid-input after reading ahead. When standard input can seek,
     // the unread remainder must be left in place for the next reader.

@@ -296,6 +296,12 @@ impl CompiledPattern {
             ));
         }
 
+        // GNU grep reads `{,}` as `{0,}`; Oniguruma takes it literally.
+        let filled_pattern = matches!(config.regex_mode, RegexMode::Basic | RegexMode::Extended)
+            .then(|| fill_empty_interval(pattern, config.regex_mode == RegexMode::Extended))
+            .flatten();
+        let pattern = filled_pattern.as_deref().unwrap_or(pattern);
+
         let mut normalized_pattern = None;
         let pattern = if config.regex_mode == RegexMode::Extended {
             if let Some((op, rest)) = strip_leading_repeat_operator(pattern) {
@@ -609,6 +615,35 @@ fn has_reversed_interval(pattern: &[u8], extended: bool) -> bool {
     false
 }
 
+/// `pattern` with each empty interval `{,}` (`\\{,\\}` in a basic regexp)
+/// outside bracket expressions written as `{0,}`, or None when it has none.
+fn fill_empty_interval(pattern: &str, extended: bool) -> Option<String> {
+    let bytes = pattern.as_bytes();
+    let (open, close): (&[u8], &[u8]) = if extended {
+        (b"{", b",}")
+    } else {
+        (b"\\{", b",\\}")
+    };
+    let mut out = String::new();
+    let mut copied = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i..].starts_with(open) && bytes[i + open.len()..].starts_with(close) {
+            out.push_str(&pattern[copied..i + open.len()]);
+            out.push('0');
+            copied = i + open.len();
+            i += open.len() + close.len();
+            continue;
+        }
+        i = match bytes[i] {
+            b'[' => scan_bracket(bytes, i + 1).1,
+            b'\\' => i + 2,
+            _ => i + 1,
+        };
+    }
+    (copied > 0).then(|| out + &pattern[copied..])
+}
+
 /// Scan the body of a bracket expression starting at `start` (just past the
 /// `[`). Returns whether it is a misspelled character class and the index just
 /// past its closing `]`.
@@ -670,7 +705,7 @@ fn find_bracket_subexpr_end(pattern: &[u8], start: usize, delimiter: u8) -> Opti
 
 #[cfg(test)]
 mod tests {
-    use super::{has_confusing_bracket, has_reversed_interval, plain_literal};
+    use super::{fill_empty_interval, has_confusing_bracket, has_reversed_interval, plain_literal};
     use crate::RegexMode;
 
     fn lit(p: &str, ic: bool, mode: RegexMode) -> Option<Vec<u8>> {
@@ -711,6 +746,31 @@ mod tests {
         assert_eq!(lit("abc", true, RegexMode::Basic), None);
         assert_eq!(lit("café", false, RegexMode::Fixed), None); // non-ASCII
         assert_eq!(lit("naïve", false, RegexMode::Basic), None);
+    }
+
+    #[test]
+    fn fills_empty_intervals() {
+        assert_eq!(
+            fill_empty_interval("fo{,}", true).as_deref(),
+            Some("fo{0,}")
+        );
+        assert_eq!(
+            fill_empty_interval("(ab){,}x{,}", true).as_deref(),
+            Some("(ab){0,}x{0,}")
+        );
+        assert_eq!(
+            fill_empty_interval("fo\\{,\\}", false).as_deref(),
+            Some("fo\\{0,\\}")
+        );
+        for (p, extended) in [
+            ("fo{,1}", true),
+            ("[{,}]", true),
+            ("\\{,}", true),
+            ("fo{,}", false),
+            ("fo{1,}", true),
+        ] {
+            assert_eq!(fill_empty_interval(p, extended), None, "pattern {p:?}");
+        }
     }
 
     #[test]
